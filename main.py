@@ -2,9 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
-import asyncio
-import edge_tts
 from openai import OpenAI
+from gtts import gTTS
 
 app = FastAPI()
 
@@ -26,22 +25,23 @@ def root():
 @app.post("/generate-video")
 async def generate_video(topic: str):
     try:
-        # 1. Generate script
+        # 1. Generate script with OpenAI
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write a short TikTok script about {topic}"}]
+            messages=[{"role": "user", "content": f"Write a short, engaging 30-second TikTok script about {topic}. Just give me the spoken text, no intro or outro."}]
         )
         script = response.choices[0].message.content
         
-        # 2. Generate voiceover
-        communicate = edge_tts.Communicate(script, "en-US-GuyNeural")
+        # 2. Generate voiceover with gTTS (Google Text-to-Speech)
+        tts = gTTS(text=script, lang='en', slow=False)
         audio_path = "audio.mp3"
-        await communicate.save(audio_path)
+        tts.save(audio_path)
         
         return {
             "status": "success",
             "script": script,
-            "message": "Audio generated! (Video generation coming soon)"
+            "message": "Audio generated successfully!",
+            "audio_length": "Check logs for duration"
         }
         
     except Exception as e:
