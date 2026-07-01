@@ -6,4 +6,4 @@ moviepy
 imageio-ffmpeg
 requests==2.31.0
 httpx==0.26.0
-numpy
+pillow
