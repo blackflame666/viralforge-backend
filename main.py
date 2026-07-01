@@ -49,7 +49,7 @@ def update_job(job_id, updates):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API - Ultra Lite v2"}
+    return {"status": "ViralForge API v3"}
 
 @app.post("/generate-video")
 async def generate_video(
@@ -58,8 +58,13 @@ async def generate_video(
 ):
     job_id = str(uuid.uuid4())
     job_data = {
-        "job_id": job_id, "status": "processing", "progress": 0,
-        "topic": topic, "duration": duration, "created_at": time.time(), "video_path": None
+        "job_id": job_id, 
+        "status": "processing", 
+        "progress": 0,
+        "topic": topic, 
+        "duration": duration, 
+        "created_at": time.time(), 
+        "video_path": None
     }
     save_job(job_id, job_data)
     asyncio.create_task(create_video(job_id, topic, duration))
@@ -94,51 +99,43 @@ async def create_video(job_id: str, topic: str, duration: int):
     try:
         print(f"[{job_id}] Starting...")
         
-        # Step 1: Generate script (20%)
+        # 20% - Script
         update_job(job_id, {"progress": 20})
-        print(f"[{job_id}] Generating script...")
-        
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write a {duration}-second viral script about {topic}. Keep it under {duration*2} words."}]
+            messages=[{"role": "user", "content": f"Write a {duration}-second script about {topic}. {duration*2} words max."}]
         )
         script = response.choices[0].message.content
-        print(f"[{job_id}] Script: {script[:50]}...")
         
-        # Step 2: Generate audio (40%)
+        # 40% - Audio
         update_job(job_id, {"progress": 40})
-        print(f"[{job_id}] Generating audio...")
-        
         tts = gTTS(text=script, lang='en', slow=False)
         audio_path = f"/tmp/audio_{job_id}.mp3"
         tts.save(audio_path)
-        
-        # Get audio duration
         audio = AudioFileClip(audio_path)
         audio_duration = audio.duration
-        print(f"[{job_id}] Audio duration: {audio_duration:.2f}s")
         
-        # Step 3: Create video clip (70%)
+        # 70% - Create clip
         update_job(job_id, {"progress": 70})
-        print(f"[{job_id}] Creating video...")
         
-        # Create a simple colored clip - MoviePy 2.x syntax
+        # ✅ CORRECT MoviePy 2.x syntax:
         clip = ColorClip(
             size=(480, 854), 
-            color=(139, 92, 246),  # Purple
-            duration=audio_duration,
-            fps=15  # Set FPS here, not with set_fps()
+            color=(139, 92, 246),
+            duration=audio_duration
+            # NO fps here!
         )
         
-        # Add audio to clip
+        # Set FPS separately
+        clip = clip.with_fps(15)
+        
+        # Add audio
         clip = clip.with_audio(audio)
         
-        # Step 4: Render (90%)
+        # 90% - Render
         update_job(job_id, {"progress": 90})
-        print(f"[{job_id}] Rendering...")
         
         output_path = f"/tmp/video_{job_id}.mp4"
-        
         clip.write_videofile(
             output_path,
             codec="libx264",
@@ -150,31 +147,27 @@ async def create_video(job_id: str, topic: str, duration: int):
             logger=None
         )
         
-        # Cleanup
         audio.close()
         clip.close()
         
-        # Step 5: Complete (100%)
+        # 100% - Done
         update_job(job_id, {
             "status": "completed", 
             "progress": 100, 
             "video_path": output_path
         })
         
-        print(f"[{job_id}] ✅ SUCCESS!")
+        print(f"[{job_id}] SUCCESS!")
         
     except Exception as e:
-        error_msg = f"{str(e)}"
-        print(f"[{job_id}] ❌ FAILED: {error_msg}")
-        import traceback
-        traceback.print_exc()
-        
+        error_msg = str(e)
+        print(f"[{job_id}] FAILED: {error_msg}")
         update_job(job_id, {
             "status": "failed", 
             "error": error_msg
         })
 
-# Cleanup old jobs
+# Cleanup
 import shutil
 if JOBS_DIR.exists():
     shutil.rmtree(JOBS_DIR)
