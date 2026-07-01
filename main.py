@@ -6,13 +6,16 @@ import requests
 import tempfile
 from openai import OpenAI
 from gtts import gTTS
-from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, TextClip
+from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import imageio_ffmpeg
 import asyncio
 import time
 import uuid
 import json
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -51,9 +54,50 @@ def update_job(job_id, updates):
         job.update(updates)
         save_job(job_id, job)
 
+def create_caption_frame(text, width=720, height=200):
+    """Create a caption image using PIL (no ImageMagick needed!)"""
+    try:
+        # Create black background with transparency
+        img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # Try to use a bold font, fallback to default
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+        except:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", 40)
+            except:
+                font = ImageFont.load_default()
+        
+        # Get text bounding box for centering
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Calculate position (center horizontally)
+        x = (width - text_width) // 2
+        y = (height - text_height) // 2
+        
+        # Draw text with black outline (stroke)
+        stroke_width = 3
+        draw.text((x-stroke_width, y), text, font=font, fill='black')
+        draw.text((x+stroke_width, y), text, font=font, fill='black')
+        draw.text((x, y-stroke_width), text, font=font, fill='black')
+        draw.text((x, y+stroke_width), text, font=font, fill='black')
+        
+        # Draw white text on top
+        draw.text((x, y), text, font=font, fill='white')
+        
+        # Convert to numpy array
+        return np.array(img)
+    except Exception as e:
+        print(f"Caption creation error: {e}")
+        return None
+
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v6 - With Music!"}
+    return {"status": "ViralForge API v7 - Pillow Captions!"}
 
 @app.post("/generate-video")
 async def generate_video(
@@ -94,7 +138,7 @@ async def download_video(job_id: str):
         filename=f"viralforge_{job['topic'].replace(' ', '_')}.mp4"
     )
 
-def split_text_for_captions(text, max_words=6):
+def split_text_for_captions(text, max_words=5):
     """Split script into chunks for captions"""
     words = text.split()
     chunks = []
@@ -107,23 +151,22 @@ async def download_background_music(duration, job_id):
     """Download background music from Pixabay"""
     try:
         if not PIXABAY_API_KEY:
-            print(f"[{job_id}] No Pixabay API key")
+            print(f"[{job_id}] ⚠️ No Pixabay API key found!")
             return None
         
-        # Search for upbeat background music
-        search_terms = ["upbeat corporate", "motivational", "energetic pop", "happy background"]
+        search_terms = ["upbeat", "motivational", "energetic", "happy"]
         import random
         term = random.choice(search_terms)
         
-        url = f"https://pixabay.com/api/music/?key={PIXABAY_API_KEY}&q={term}&per_page=5"
+        url = f"https://pixabay.com/api/music/?key={PIXABAY_API_KEY}&q={term}&per_page=3"
+        print(f"[{job_id}] Searching Pixabay for: {term}")
         res = requests.get(url, timeout=10)
         data = res.json()
         
         if data.get('hits') and len(data['hits']) > 0:
-            # Pick a random track
-            track = random.choice(data['hits'])
+            track = data['hits'][0]  # Use first result
             music_url = track['preview']
-            print(f"[{job_id}] Downloading music: {track['title']}")
+            print(f"[{job_id}] 🎵 Found music: {track['title']}")
             
             music_data = requests.get(music_url, timeout=15).content
             music_path = f"/tmp/music_{job_id}.mp3"
@@ -131,46 +174,45 @@ async def download_background_music(duration, job_id):
             with open(music_path, 'wb') as f:
                 f.write(music_data)
             
+            print(f"[{job_id}] ✅ Music downloaded!")
             return music_path
         else:
-            print(f"[{job_id}] No music found on Pixabay")
+            print(f"[{job_id}] ❌ No music found on Pixabay")
             return None
             
     except Exception as e:
-        print(f"[{job_id}] Music download error: {e}")
+        print(f"[{job_id}] ❌ Music error: {e}")
         return None
 
 async def create_video(job_id: str, topic: str, duration: int):
     music_path = None
     try:
-        print(f"[{job_id}] Starting Pro generation with music...")
+        print(f"[{job_id}] 🎬 Starting Pro generation...")
         
         # 20% - Script
         update_job(job_id, {"progress": 20})
-        print(f"[{job_id}] Generating script...")
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write a {duration}-second viral script about {topic}. {duration*2} words max. Make it engaging with short punchy sentences."}]
+            messages=[{"role": "user", "content": f"Write a {duration}-second viral script about {topic}. {duration*2} words max."}]
         )
         script = response.choices[0].message.content
-        print(f"[{job_id}] Script: {script[:50]}...")
+        print(f"[{job_id}] 📝 Script: {script[:50]}...")
         
         # 40% - Audio
         update_job(job_id, {"progress": 40})
-        print(f"[{job_id}] Generating voiceover...")
         tts = gTTS(text=script, lang='en', slow=False)
         audio_path = f"/tmp/audio_{job_id}.mp3"
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         audio_duration = audio.duration
+        print(f"[{job_id}] 🎤 Audio duration: {audio_duration:.2f}s")
         
-        # Split script for captions
         caption_chunks = split_text_for_captions(script, max_words=5)
         chunk_duration = audio_duration / len(caption_chunks) if caption_chunks else 2
         
         # 60% - Fetch Stock Footage
         update_job(job_id, {"progress": 60})
-        print(f"[{job_id}] Fetching stock footage...")
+        print(f"[{job_id}] 🎥 Fetching stock footage...")
         
         video_clips = []
         if PEXELS_API_KEY:
@@ -182,7 +224,6 @@ async def create_video(job_id: str, topic: str, duration: int):
                 if res.get('videos') and len(res['videos']) > 0:
                     for i, video in enumerate(res['videos'][:2]):
                         video_url = video['video_files'][0]['link']
-                        print(f"[{job_id}] Downloading clip {i+1}...")
                         vid_data = requests.get(video_url, timeout=15).content
                         
                         temp_path = f"/tmp/stock_{job_id}_{i}.mp4"
@@ -192,97 +233,92 @@ async def create_video(job_id: str, topic: str, duration: int):
                         clip = VideoFileClip(temp_path)
                         clip = clip.resized((720, 1280))
                         
-                        clip_duration = audio_duration / 2
-                        if clip.duration < clip_duration:
-                            clip = clip.loop(duration=clip_duration)
+                        clip_dur = audio_duration / 2
+                        if clip.duration < clip_dur:
+                            clip = clip.loop(duration=clip_dur)
                         else:
-                            clip = clip.subclipped(0, clip_duration)
+                            clip = clip.subclipped(0, clip_dur)
                         
                         if i > 0:
                             clip = clip.crossfadein(0.5)
                         
                         video_clips.append(clip)
+                        print(f"[{job_id}] ✅ Clip {i+1} ready")
                 else:
-                    print(f"[{job_id}] No videos found")
+                    print(f"[{job_id}] ⚠️ No videos found")
                     
             except Exception as e:
-                print(f"[{job_id}] Pexels error: {e}")
+                print(f"[{job_id}] ❌ Pexels error: {e}")
         else:
-            print(f"[{job_id}] No Pexels API Key")
+            print(f"[{job_id}] ⚠️ No Pexels API Key")
         
         # 70% - Download Background Music
         update_job(job_id, {"progress": 70})
-        print(f"[{job_id}] Downloading background music...")
         music_path = await download_background_music(audio_duration, job_id)
         
-        # 75% - Create Captions
+        # 75% - Create Video with Captions using PIL
         update_job(job_id, {"progress": 75})
-        print(f"[{job_id}] Creating captions...")
+        print(f"[{job_id}] 📝 Creating captions with PIL...")
         
-        caption_clips = []
-        for i, text in enumerate(caption_chunks):
-            try:
-                txt_clip = TextClip(
-                    text=text,
-                    size=(680, 200),
-                    font='Arial',
-                    fontsize=50,
-                    color='white',
-                    stroke_color='black',
-                    stroke_width=2,
-                    method='caption'
-                )
-                txt_clip = txt_clip.set_position(('center', 1000)).set_start(i * chunk_duration).set_duration(chunk_duration)
-                caption_clips.append(txt_clip)
-            except Exception as e:
-                print(f"[{job_id}] Caption error: {e}")
-        
-        # Combine video clips
+        # Combine base video
         if video_clips:
             final_video = CompositeVideoClip(video_clips, size=(720, 1280))
         else:
             final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
         
-        if caption_clips:
-            final_video = CompositeVideoClip([final_video] + caption_clips, size=(720, 1280))
+        # Add captions as overlay
+        if caption_chunks:
+            print(f"[{job_id}] Adding {len(caption_chunks)} caption overlays...")
+            caption_overlays = []
+            
+            for i, text in enumerate(caption_chunks):
+                caption_img = create_caption_frame(text, width=680, height=150)
+                if caption_img is not None:
+                    # Create ImageClip from numpy array
+                    from moviepy import ImageClip
+                    img_clip = ImageClip(caption_img, transparent=True)
+                    # Position at bottom center
+                    img_clip = img_clip.set_position(('center', 1050)).set_start(i * chunk_duration).set_duration(chunk_duration)
+                    caption_overlays.append(img_clip)
+            
+            if caption_overlays:
+                final_video = CompositeVideoClip([final_video] + caption_overlays, size=(720, 1280))
+                print(f"[{job_id}] ✅ Captions added!")
+            else:
+                print(f"[{job_id}] ⚠️ No captions created")
         
         final_video = final_video.with_fps(15)
         
-        # 85% - Mix Audio (Voiceover + Music)
+        # 85% - Mix Audio
         update_job(job_id, {"progress": 85})
-        print(f"[{job_id}] Mixing audio...")
+        print(f"[{job_id}] 🎵 Mixing audio...")
         
         if music_path and os.path.exists(music_path):
             try:
                 bg_music = AudioFileClip(music_path)
                 
-                # Loop or trim music to match video duration
                 if bg_music.duration < audio_duration:
                     bg_music = bg_music.loop(duration=audio_duration)
                 else:
                     bg_music = bg_music.subclipped(0, audio_duration)
                 
-                # Lower background music volume (25% so voiceover is clear)
                 bg_music = bg_music.volumex(0.25)
-                
-                # Mix voiceover (100%) + background music (25%)
                 final_audio = CompositeAudioClip([audio, bg_music])
-                
                 bg_music.close()
-                print(f"[{job_id}] Audio mixed successfully!")
+                print(f"[{job_id}] ✅ Audio mixed with music!")
                 
             except Exception as e:
-                print(f"[{job_id}] Music mixing error: {e}")
+                print(f"[{job_id}] ❌ Music mixing error: {e}")
                 final_audio = audio
         else:
-            print(f"[{job_id}] Using voiceover only")
+            print(f"[{job_id}] ⚠️ Using voiceover only (no music)")
             final_audio = audio
         
         final_video = final_video.with_audio(final_audio)
         
         # 90% - Render
         update_job(job_id, {"progress": 90})
-        print(f"[{job_id}] Rendering final video...")
+        print(f"[{job_id}] 🎬 Rendering...")
         
         output_path = f"/tmp/video_{job_id}.mp4"
         final_video.write_videofile(
