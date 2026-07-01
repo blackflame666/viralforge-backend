@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+openai
+edge-tts
+moviepy
+requests
+python-dotenv
+imageio-ffmpeg
