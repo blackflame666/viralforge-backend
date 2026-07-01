@@ -143,7 +143,6 @@ async def create_video(job_id: str, topic: str, duration: int):
             preset="ultrafast",
             bitrate="500k",
             threads=1,
-            verbose=False,
             logger=None
         )
         
