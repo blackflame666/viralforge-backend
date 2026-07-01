@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 import os
 from openai import OpenAI
 from gtts import gTTS
-from moviepy.editor import ColorClip, AudioFileClip
+from moviepy import ColorClip, AudioFileClip
 import imageio_ffmpeg
 import asyncio
 import time
