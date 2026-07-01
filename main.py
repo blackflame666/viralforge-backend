@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import os
 import requests
 import tempfile
@@ -8,8 +8,8 @@ from openai import OpenAI
 from gtts import gTTS
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 import imageio_ffmpeg
+import time
 
-# Tell MoviePy where the FFmpeg binary is
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
 app = FastAPI()
@@ -33,10 +33,12 @@ def root():
 @app.post("/generate-video")
 async def generate_video(topic: str):
     try:
-        # 1. Generate script
+        start_time = time.time()
+        
+        # 1. Generate script (keep it short - 10 seconds max)
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write a short, engaging 15-second TikTok script about {topic}. Just give me the spoken text, no intro or outro."}]
+            messages=[{"role": "user", "content": f"Write ONE short engaging sentence about {topic} for a 10-second video. Maximum 20 words."}]
         )
         script = response.choices[0].message.content
         
@@ -46,38 +48,40 @@ async def generate_video(topic: str):
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         
-        # 3. Get stock footage from Pexels
+        # 3. Get JUST ONE stock video from Pexels (faster)
         headers = {"Authorization": PEXELS_API_KEY}
-        search_url = f"https://api.pexels.com/videos/search?query={topic}&per_page=3&orientation=portrait"
-        pexels_res = requests.get(search_url, headers=headers).json()
+        search_url = f"https://api.pexels.com/videos/search?query={topic}&per_page=1&orientation=portrait"
+        pexels_res = requests.get(search_url, headers=headers, timeout=10).json()
         
-        video_clips = []
-        clip_duration = audio.duration / 3 
+        if not pexels_res['videos']:
+            raise Exception("No videos found on Pexels")
         
-        for video in pexels_res['videos'][:3]:
-            video_url = video['video_files'][0]['link']
-            vid_res = requests.get(video_url)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_vid:
-                tmp_vid.write(vid_res.content)
-                clip = VideoFileClip(tmp_vid.name)
-                # Resize to vertical 1080x1920 for TikTok
-                clip = clip.resized((1080, 1920))
-                
-                # Loop or trim clip to match required duration
-                if clip.duration < clip_duration:
-                    clip = clip.loop(duration=clip_duration)
-                else:
-                    clip = clip.subclipped(0, clip_duration)
-                video_clips.append(clip)
+        video = pexels_res['videos'][0]
+        video_url = video['video_files'][0]['link']
         
-        # 4. Combine video and audio
-        final_video = concatenate_videoclips(video_clips, method="compose")
-        final_video = final_video.with_audio(audio)
+        # Download video
+        vid_res = requests.get(video_url, timeout=15)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_vid:
+            tmp_vid.write(vid_res.content)
+            clip = VideoFileClip(tmp_vid.name)
+            
+            # Simple: just loop the video to match audio length
+            if clip.duration < audio.duration:
+                clip = clip.loop(duration=audio.duration)
+            else:
+                clip = clip.subclipped(0, audio.duration)
+            
+            # Add audio
+            final_clip = clip.with_audio(audio)
+            
+            # Write video (LOW quality for speed)
+            output_path = "final_video.mp4"
+            final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=15, verbose=False, logger=None)
         
-        output_path = "final_video.mp4"
-        final_video.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=24)
+        elapsed = time.time() - start_time
         
-        return FileResponse(output_path, media_type="video/mp4", filename="viralforge_video.mp4")
+        # Return file
+        return FileResponse(output_path, media_type="video/mp4", filename=f"viralforge_{topic.replace(' ', '_')}.mp4")
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
