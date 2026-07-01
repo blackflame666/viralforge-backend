@@ -6,8 +6,7 @@ import requests
 import tempfile
 from openai import OpenAI
 from gtts import gTTS
-from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, effects
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, ImageClip
 import imageio_ffmpeg
 import asyncio
 import time
@@ -16,6 +15,7 @@ import json
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+import shutil
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -54,7 +54,7 @@ def update_job(job_id, updates):
         job.update(updates)
         save_job(job_id, job)
 
-def create_caption_frame(text, width=720, height=150):
+def create_caption_frame(text, width=680, height=150):
     try:
         img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -121,7 +121,7 @@ async def download_background_music(duration, job_id):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v8 - Fixed!"}
+    return {"status": "ViralForge API v9 - Final!"}
 
 @app.post("/generate-video")
 async def generate_video(topic: str = Query(...), duration: int = Query(default=10, ge=5, le=15)):
@@ -155,7 +155,6 @@ async def create_video(job_id: str, topic: str, duration: int):
     try:
         print(f"[{job_id}] Starting...")
         
-        # Script
         update_job(job_id, {"progress": 20})
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -163,7 +162,6 @@ async def create_video(job_id: str, topic: str, duration: int):
         )
         script = response.choices[0].message.content
         
-        # Audio
         update_job(job_id, {"progress": 40})
         tts = gTTS(text=script, lang='en', slow=False)
         audio_path = f"/tmp/audio_{job_id}.mp3"
@@ -174,7 +172,6 @@ async def create_video(job_id: str, topic: str, duration: int):
         caption_chunks = split_text_for_captions(script, max_words=5)
         chunk_duration = audio_duration / len(caption_chunks) if caption_chunks else 2
         
-        # Stock Footage
         update_job(job_id, {"progress": 60})
         video_clips = []
         
@@ -202,19 +199,13 @@ async def create_video(job_id: str, topic: str, duration: int):
                         else:
                             clip = clip.subclipped(0, clip_dur)
                         
-                        # ✅ MoviePy 2.x: Use with_effects
-                        if i > 0:
-                            clip = clip.with_effects([effects.CrossFadeIn(0.5)])
-                        
                         video_clips.append(clip)
             except Exception as e:
                 print(f"[{job_id}] Pexels error: {e}")
         
-        # Music
         update_job(job_id, {"progress": 70})
         music_path = await download_background_music(audio_duration, job_id)
         
-        # Captions
         update_job(job_id, {"progress": 75})
         
         if video_clips:
@@ -223,14 +214,12 @@ async def create_video(job_id: str, topic: str, duration: int):
             final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
         
         if caption_chunks:
-            from moviepy import ImageClip
             caption_overlays = []
             
             for i, text in enumerate(caption_chunks):
                 caption_img = create_caption_frame(text, width=680, height=150)
                 if caption_img is not None:
                     img_clip = ImageClip(caption_img, transparent=True)
-                    # ✅ MoviePy 2.x: Use with_position, with_start, with_duration
                     img_clip = img_clip.with_position(('center', 1050)).with_start(i * chunk_duration).with_duration(chunk_duration)
                     caption_overlays.append(img_clip)
             
@@ -239,7 +228,6 @@ async def create_video(job_id: str, topic: str, duration: int):
         
         final_video = final_video.with_fps(15)
         
-        # Mix Audio
         update_job(job_id, {"progress": 85})
         
         if music_path and os.path.exists(music_path):
@@ -261,7 +249,6 @@ async def create_video(job_id: str, topic: str, duration: int):
         
         final_video = final_video.with_audio(final_audio)
         
-        # Render
         update_job(job_id, {"progress": 90})
         output_path = f"/tmp/video_{job_id}.mp4"
         
@@ -275,7 +262,6 @@ async def create_video(job_id: str, topic: str, duration: int):
             logger=None
         )
         
-        # Cleanup
         final_video.close()
         audio.close()
         if os.path.exists(audio_path):
@@ -297,8 +283,6 @@ async def create_video(job_id: str, topic: str, duration: int):
         traceback.print_exc()
         update_job(job_id, {"status": "failed", "error": error_msg})
 
-# Cleanup
-import shutil
 if JOBS_DIR.exists():
     shutil.rmtree(JOBS_DIR)
     JOBS_DIR.mkdir(exist_ok=True)
