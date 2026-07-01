@@ -2,9 +2,11 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
+import requests
+import tempfile
 from openai import OpenAI
 from gtts import gTTS
-from moviepy import ColorClip, AudioFileClip
+from moviepy import ColorClip, AudioFileClip, VideoFileClip
 import imageio_ffmpeg
 import asyncio
 import time
@@ -25,6 +27,7 @@ app.add_middleware(
 )
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 JOBS_DIR = Path("/tmp/jobs")
@@ -49,7 +52,7 @@ def update_job(job_id, updates):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v3"}
+    return {"status": "ViralForge API v4 - With Stock Footage!"}
 
 @app.post("/generate-video")
 async def generate_video(
@@ -58,13 +61,8 @@ async def generate_video(
 ):
     job_id = str(uuid.uuid4())
     job_data = {
-        "job_id": job_id, 
-        "status": "processing", 
-        "progress": 0,
-        "topic": topic, 
-        "duration": duration, 
-        "created_at": time.time(), 
-        "video_path": None
+        "job_id": job_id, "status": "processing", "progress": 0,
+        "topic": topic, "duration": duration, "created_at": time.time(), "video_path": None
     }
     save_job(job_id, job_data)
     asyncio.create_task(create_video(job_id, topic, duration))
@@ -96,6 +94,7 @@ async def download_video(job_id: str):
     )
 
 async def create_video(job_id: str, topic: str, duration: int):
+    stock_video_path = None
     try:
         print(f"[{job_id}] Starting...")
         
@@ -115,25 +114,57 @@ async def create_video(job_id: str, topic: str, duration: int):
         audio = AudioFileClip(audio_path)
         audio_duration = audio.duration
         
-        # 70% - Create clip
+        # 60% - Fetch Stock Footage (Safe Mode)
+        update_job(job_id, {"progress": 60})
+        print(f"[{job_id}] Trying to fetch stock footage for: {topic}")
+        
+        if PEXELS_API_KEY:
+            try:
+                headers = {"Authorization": PEXELS_API_KEY}
+                # Search for 1 vertical video
+                url = f"https://api.pexels.com/videos/search?query={topic}&per_page=1&orientation=portrait"
+                res = requests.get(url, headers=headers, timeout=10).json()
+                
+                if res.get('videos') and len(res['videos']) > 0:
+                    video_url = res['videos'][0]['video_files'][0]['link']
+                    print(f"[{job_id}] Downloading stock video...")
+                    vid_data = requests.get(video_url, timeout=15).content
+                    
+                    stock_video_path = f"/tmp/stock_{job_id}.mp4"
+                    with open(stock_video_path, 'wb') as f:
+                        f.write(vid_data)
+                    print(f"[{job_id}] Stock video saved!")
+                else:
+                    print(f"[{job_id}] No videos found on Pexels.")
+            except Exception as e:
+                print(f"[{job_id}] Pexels error: {e}")
+        else:
+            print(f"[{job_id}] No Pexels API Key found in environment variables!")
+
+        # 70% - Create Clip
         update_job(job_id, {"progress": 70})
         
-        # ✅ CORRECT MoviePy 2.x syntax:
-        clip = ColorClip(
-            size=(480, 854), 
-            color=(139, 92, 246),
-            duration=audio_duration
-            # NO fps here!
-        )
-        
-        # Set FPS separately
+        # Use stock footage if we got it, otherwise fallback to purple
+        if stock_video_path and os.path.exists(stock_video_path):
+            print(f"[{job_id}] Using stock footage...")
+            clip = VideoFileClip(stock_video_path)
+            clip = clip.resized((480, 854)) # Resize to save memory
+            
+            # Loop or trim to match audio
+            if clip.duration < audio_duration:
+                clip = clip.loop(duration=audio_duration)
+            else:
+                clip = clip.subclipped(0, audio_duration)
+        else:
+            print(f"[{job_id}] Fallback to purple screen...")
+            clip = ColorClip(size=(480, 854), color=(139, 92, 246), duration=audio_duration)
+            
         clip = clip.with_fps(15)
-        
-        # Add audio
         clip = clip.with_audio(audio)
         
         # 90% - Render
         update_job(job_id, {"progress": 90})
+        print(f"[{job_id}] Rendering final video...")
         
         output_path = f"/tmp/video_{job_id}.mp4"
         clip.write_videofile(
@@ -146,9 +177,14 @@ async def create_video(job_id: str, topic: str, duration: int):
             logger=None
         )
         
+        # Cleanup
         audio.close()
         clip.close()
-        
+        if stock_video_path and os.path.exists(stock_video_path):
+            os.remove(stock_video_path)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+            
         # 100% - Done
         update_job(job_id, {
             "status": "completed", 
