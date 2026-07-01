@@ -6,7 +6,11 @@ import requests
 import tempfile
 from openai import OpenAI
 from gtts import gTTS
-from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, ImageClip
+from moviepy import (
+    ColorClip, AudioFileClip, VideoFileClip, 
+    CompositeVideoClip, CompositeAudioClip, ImageClip,
+    concatenate_videoclips
+)
 import imageio_ffmpeg
 import asyncio
 import time
@@ -17,10 +21,12 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import shutil
 
+# Setup FFmpeg
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
 app = FastAPI()
 
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,11 +35,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Environment Variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Job Storage
 JOBS_DIR = Path("/tmp/jobs")
 JOBS_DIR.mkdir(exist_ok=True)
 
@@ -55,6 +63,7 @@ def update_job(job_id, updates):
         save_job(job_id, job)
 
 def create_caption_frame(text, width=680, height=150):
+    """Create a caption image using PIL (No ImageMagick needed)"""
     try:
         img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -68,10 +77,12 @@ def create_caption_frame(text, width=680, height=150):
         x = (width - text_width) // 2
         y = (height - 40) // 2
         
+        # Black outline
         draw.text((x-2, y), text, font=font, fill='black')
         draw.text((x+2, y), text, font=font, fill='black')
         draw.text((x, y-2), text, font=font, fill='black')
         draw.text((x, y+2), text, font=font, fill='black')
+        # White text
         draw.text((x, y), text, font=font, fill='white')
         
         return np.array(img)
@@ -88,6 +99,7 @@ def split_text_for_captions(text, max_words=5):
     return chunks
 
 async def download_background_music(duration, job_id):
+    """Download background music from Pixabay"""
     try:
         if not PIXABAY_API_KEY:
             print(f"[{job_id}] No Pixabay API key")
@@ -121,7 +133,7 @@ async def download_background_music(duration, job_id):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v9 - Final!"}
+    return {"status": "ViralForge API v10 - Fixed Duration!"}
 
 @app.post("/generate-video")
 async def generate_video(topic: str = Query(...), duration: int = Query(default=10, ge=5, le=15)):
@@ -155,6 +167,7 @@ async def create_video(job_id: str, topic: str, duration: int):
     try:
         print(f"[{job_id}] Starting...")
         
+        # 1. Script
         update_job(job_id, {"progress": 20})
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -162,27 +175,34 @@ async def create_video(job_id: str, topic: str, duration: int):
         )
         script = response.choices[0].message.content
         
+        # 2. Audio
         update_job(job_id, {"progress": 40})
         tts = gTTS(text=script, lang='en', slow=False)
         audio_path = f"/tmp/audio_{job_id}.mp3"
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         audio_duration = audio.duration
+        print(f"[{job_id}] Audio duration: {audio_duration:.2f}s")
         
         caption_chunks = split_text_for_captions(script, max_words=5)
         chunk_duration = audio_duration / len(caption_chunks) if caption_chunks else 2
         
+        # 3. Stock Footage (FIXED DURATION LOGIC)
         update_job(job_id, {"progress": 60})
         video_clips = []
         
         if PEXELS_API_KEY:
             try:
                 headers = {"Authorization": PEXELS_API_KEY}
-                url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
+                url = f"https://api.pexels.com/videos/search?query={topic}&per_page=3&orientation=portrait"
                 res = requests.get(url, headers=headers, timeout=10).json()
                 
                 if res.get('videos'):
-                    for i, video in enumerate(res['videos'][:2]):
+                    # We want to fill the entire audio_duration
+                    num_clips = min(len(res['videos']), 3)
+                    target_clip_len = audio_duration / num_clips
+                    
+                    for i, video in enumerate(res['videos'][:num_clips]):
                         video_url = video['video_files'][0]['link']
                         vid_data = requests.get(video_url, timeout=15).content
                         
@@ -193,29 +213,43 @@ async def create_video(job_id: str, topic: str, duration: int):
                         clip = VideoFileClip(temp_path)
                         clip = clip.resized((720, 1280))
                         
-                        clip_dur = audio_duration / 2
-                        if clip.duration < clip_dur:
-                            clip = clip.loop(duration=clip_dur)
+                        # Loop or trim to match target length exactly
+                        if clip.duration < target_clip_len:
+                            clip = clip.loop(duration=target_clip_len)
                         else:
-                            clip = clip.subclipped(0, clip_dur)
+                            clip = clip.subclipped(0, target_clip_len)
                         
                         video_clips.append(clip)
+                        print(f"[{job_id}] Clip {i+1} ready: {clip.duration:.2f}s")
             except Exception as e:
                 print(f"[{job_id}] Pexels error: {e}")
         
+        # 4. Music
         update_job(job_id, {"progress": 70})
         music_path = await download_background_music(audio_duration, job_id)
         
+        # 5. Combine Video & Captions
         update_job(job_id, {"progress": 75})
         
-        if video_clips:
-            final_video = CompositeVideoClip(video_clips, size=(720, 1280))
-        else:
+        if not video_clips:
+            # Fallback if no stock footage
             final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
+        else:
+            # Concatenate clips
+            final_video = concatenate_videoclips(video_clips, method="compose")
+            
+            # SAFETY NET: If total video is still shorter than audio, add colored background to fill gap
+            if final_video.duration < audio_duration:
+                remaining_time = audio_duration - final_video.duration
+                print(f"[{job_id}] Extending video by {remaining_time:.2f}s with background color")
+                bg_clip = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=remaining_time).with_fps(15)
+                final_video = concatenate_videoclips([final_video, bg_clip], method="compose")
+            elif final_video.duration > audio_duration:
+                final_video = final_video.subclipped(0, audio_duration)
         
+        # Add Captions
         if caption_chunks:
             caption_overlays = []
-            
             for i, text in enumerate(caption_chunks):
                 caption_img = create_caption_frame(text, width=680, height=150)
                 if caption_img is not None:
@@ -228,6 +262,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         
         final_video = final_video.with_fps(15)
         
+        # 6. Mix Audio
         update_job(job_id, {"progress": 85})
         
         if music_path and os.path.exists(music_path):
@@ -238,7 +273,7 @@ async def create_video(job_id: str, topic: str, duration: int):
                 else:
                     bg_music = bg_music.subclipped(0, audio_duration)
                 
-                bg_music = bg_music.volumex(0.25)
+                bg_music = bg_music.volumex(0.25) # Lower music volume
                 final_audio = CompositeAudioClip([audio, bg_music])
                 bg_music.close()
             except Exception as e:
@@ -249,6 +284,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         
         final_video = final_video.with_audio(final_audio)
         
+        # 7. Render
         update_job(job_id, {"progress": 90})
         output_path = f"/tmp/video_{job_id}.mp4"
         
@@ -262,6 +298,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             logger=None
         )
         
+        # 8. Cleanup
         final_video.close()
         audio.close()
         if os.path.exists(audio_path):
@@ -283,6 +320,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         traceback.print_exc()
         update_job(job_id, {"status": "failed", "error": error_msg})
 
+# Initial cleanup on startup
 if JOBS_DIR.exists():
     shutil.rmtree(JOBS_DIR)
     JOBS_DIR.mkdir(exist_ok=True)
