@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
@@ -31,15 +31,18 @@ def root():
     return {"status": "ViralForge API is running!", "plan": "Pro"}
 
 @app.post("/generate-video")
-async def generate_video(topic: str, duration: int = 30):
+async def generate_video(
+    topic: str = Query(..., description="Video topic"),
+    duration: int = Query(default=15, ge=10, le=60, description="Duration in seconds (10-60)")
+):
     try:
         start_time = time.time()
         
-        # 1. Generate LONGER script (30-60 seconds)
-        word_count = duration * 2  # ~2 words per second
+        # 1. Generate script
+        word_count = min(duration * 2, 60)  # Cap at 60 words for speed
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write an engaging {duration}-second TikTok script about {topic}. Use exactly {word_count} words. Make it exciting and viral-worthy. Just the spoken text, no intro/outro."}]
+            messages=[{"role": "user", "content": f"Write an engaging {duration}-second script about {topic}. Use {word_count} words max. Be concise and viral."}]
         )
         script = response.choices[0].message.content
         
@@ -49,25 +52,22 @@ async def generate_video(topic: str, duration: int = 30):
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         
-        # 3. Get MULTIPLE stock videos from Pexels
+        # 3. Get stock footage (just 2 clips for speed)
         headers = {"Authorization": PEXELS_API_KEY}
-        search_url = f"https://api.pexels.com/videos/search?query={topic}&per_page=5&orientation=portrait"
-        pexels_res = requests.get(search_url, headers=headers, timeout=15).json()
+        search_url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
+        pexels_res = requests.get(search_url, headers=headers, timeout=10).json()
         
         video_clips = []
-        clip_duration = audio.duration / len(pexels_res['videos'][:3])
+        clip_duration = audio.duration / 2
         
-        for video in pexels_res['videos'][:3]:
+        for video in pexels_res['videos'][:2]:
             video_url = video['video_files'][0]['link']
-            vid_res = requests.get(video_url, timeout=20)
+            vid_res = requests.get(video_url, timeout=15)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_vid:
                 tmp_vid.write(vid_res.content)
                 clip = VideoFileClip(tmp_vid.name)
-                
-                # Resize to vertical 1080x1920 for TikTok
                 clip = clip.resized((1080, 1920))
                 
-                # Loop or trim to match duration
                 if clip.duration < clip_duration:
                     clip = clip.loop(duration=clip_duration)
                 else:
@@ -75,28 +75,29 @@ async def generate_video(topic: str, duration: int = 30):
                 
                 video_clips.append(clip)
         
-        # 4. Combine all clips
+        # 4. Combine and render (FASTER settings)
         final_video = concatenate_videoclips(video_clips, method="compose")
         final_video = final_video.with_audio(audio)
         
-        # 5. Export HIGH QUALITY video
         output_path = "final_video.mp4"
         final_video.write_videofile(
             output_path,
             codec="libx264",
             audio_codec="aac",
             fps=24,
-            preset="medium",
-            bitrate="5000k"
+            preset="ultrafast",  # Much faster rendering
+            bitrate="2000k"      # Lower bitrate = faster render
         )
         
         elapsed = time.time() - start_time
+        print(f"Video generated in {elapsed:.2f} seconds")
         
         return FileResponse(
             output_path,
             media_type="video/mp4",
-            filename=f"viralforge_{topic.replace(' ', '_')}_{duration}s.mp4"
+            filename=f"viralforge_{topic.replace(' ', '_')}.mp4"
         )
         
     except Exception as e:
+        print(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
