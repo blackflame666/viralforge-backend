@@ -13,7 +13,6 @@ import time
 import uuid
 import json
 from pathlib import Path
-import re
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -29,6 +28,7 @@ app.add_middleware(
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 JOBS_DIR = Path("/tmp/jobs")
@@ -53,7 +53,7 @@ def update_job(job_id, updates):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v5 - Pro Features!"}
+    return {"status": "ViralForge API v6 - With Music!"}
 
 @app.post("/generate-video")
 async def generate_video(
@@ -103,11 +103,47 @@ def split_text_for_captions(text, max_words=6):
         chunks.append(chunk)
     return chunks
 
-async def create_video(job_id: str, topic: str, duration: int):
-    stock_video_path = None
-    bg_music_path = None
+async def download_background_music(duration, job_id):
+    """Download background music from Pixabay"""
     try:
-        print(f"[{job_id}] Starting Pro generation...")
+        if not PIXABAY_API_KEY:
+            print(f"[{job_id}] No Pixabay API key")
+            return None
+        
+        # Search for upbeat background music
+        search_terms = ["upbeat corporate", "motivational", "energetic pop", "happy background"]
+        import random
+        term = random.choice(search_terms)
+        
+        url = f"https://pixabay.com/api/music/?key={PIXABAY_API_KEY}&q={term}&per_page=5"
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        
+        if data.get('hits') and len(data['hits']) > 0:
+            # Pick a random track
+            track = random.choice(data['hits'])
+            music_url = track['preview']
+            print(f"[{job_id}] Downloading music: {track['title']}")
+            
+            music_data = requests.get(music_url, timeout=15).content
+            music_path = f"/tmp/music_{job_id}.mp3"
+            
+            with open(music_path, 'wb') as f:
+                f.write(music_data)
+            
+            return music_path
+        else:
+            print(f"[{job_id}] No music found on Pixabay")
+            return None
+            
+    except Exception as e:
+        print(f"[{job_id}] Music download error: {e}")
+        return None
+
+async def create_video(job_id: str, topic: str, duration: int):
+    music_path = None
+    try:
+        print(f"[{job_id}] Starting Pro generation with music...")
         
         # 20% - Script
         update_job(job_id, {"progress": 20})
@@ -136,13 +172,12 @@ async def create_video(job_id: str, topic: str, duration: int):
         update_job(job_id, {"progress": 60})
         print(f"[{job_id}] Fetching stock footage...")
         
+        video_clips = []
         if PEXELS_API_KEY:
             try:
                 headers = {"Authorization": PEXELS_API_KEY}
                 url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
                 res = requests.get(url, headers=headers, timeout=10).json()
-                
-                video_clips = []
                 
                 if res.get('videos') and len(res['videos']) > 0:
                     for i, video in enumerate(res['videos'][:2]):
@@ -157,14 +192,12 @@ async def create_video(job_id: str, topic: str, duration: int):
                         clip = VideoFileClip(temp_path)
                         clip = clip.resized((720, 1280))
                         
-                        # Add transition (crossfade)
                         clip_duration = audio_duration / 2
                         if clip.duration < clip_duration:
                             clip = clip.loop(duration=clip_duration)
                         else:
                             clip = clip.subclipped(0, clip_duration)
                         
-                        # Add crossfade transition
                         if i > 0:
                             clip = clip.crossfadein(0.5)
                         
@@ -176,17 +209,19 @@ async def create_video(job_id: str, topic: str, duration: int):
                 print(f"[{job_id}] Pexels error: {e}")
         else:
             print(f"[{job_id}] No Pexels API Key")
-            video_clips = []
         
-        # 70% - Create Video with Captions
+        # 70% - Download Background Music
         update_job(job_id, {"progress": 70})
-        print(f"[{job_id}] Adding captions and effects...")
+        print(f"[{job_id}] Downloading background music...")
+        music_path = await download_background_music(audio_duration, job_id)
         
-        # Create captions
+        # 75% - Create Captions
+        update_job(job_id, {"progress": 75})
+        print(f"[{job_id}] Creating captions...")
+        
         caption_clips = []
         for i, text in enumerate(caption_chunks):
             try:
-                # Create text clip
                 txt_clip = TextClip(
                     text=text,
                     size=(680, 200),
@@ -197,8 +232,6 @@ async def create_video(job_id: str, topic: str, duration: int):
                     stroke_width=2,
                     method='caption'
                 )
-                
-                # Position at bottom center
                 txt_clip = txt_clip.set_position(('center', 1000)).set_start(i * chunk_duration).set_duration(chunk_duration)
                 caption_clips.append(txt_clip)
             except Exception as e:
@@ -208,27 +241,41 @@ async def create_video(job_id: str, topic: str, duration: int):
         if video_clips:
             final_video = CompositeVideoClip(video_clips, size=(720, 1280))
         else:
-            # Fallback to purple gradient
             final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
         
-        # Add captions on top
         if caption_clips:
             final_video = CompositeVideoClip([final_video] + caption_clips, size=(720, 1280))
         
         final_video = final_video.with_fps(15)
         
-        # 80% - Background Music (Optional)
-        update_job(job_id, {"progress": 80})
+        # 85% - Mix Audio (Voiceover + Music)
+        update_job(job_id, {"progress": 85})
         print(f"[{job_id}] Mixing audio...")
         
-        # Try to get a free background music (royalty-free)
-        try:
-            # Using a simple royalty-free music URL or create a simple tone
-            # For now, we'll skip external music to avoid errors
-            # You can add your own music file path here
-            final_audio = audio
-        except Exception as e:
-            print(f"[{job_id}] Music error: {e}")
+        if music_path and os.path.exists(music_path):
+            try:
+                bg_music = AudioFileClip(music_path)
+                
+                # Loop or trim music to match video duration
+                if bg_music.duration < audio_duration:
+                    bg_music = bg_music.loop(duration=audio_duration)
+                else:
+                    bg_music = bg_music.subclipped(0, audio_duration)
+                
+                # Lower background music volume (25% so voiceover is clear)
+                bg_music = bg_music.volumex(0.25)
+                
+                # Mix voiceover (100%) + background music (25%)
+                final_audio = CompositeAudioClip([audio, bg_music])
+                
+                bg_music.close()
+                print(f"[{job_id}] Audio mixed successfully!")
+                
+            except Exception as e:
+                print(f"[{job_id}] Music mixing error: {e}")
+                final_audio = audio
+        else:
+            print(f"[{job_id}] Using voiceover only")
             final_audio = audio
         
         final_video = final_video.with_audio(final_audio)
@@ -251,11 +298,12 @@ async def create_video(job_id: str, topic: str, duration: int):
         # Cleanup
         final_video.close()
         audio.close()
-        if stock_video_path and os.path.exists(stock_video_path):
-            os.remove(stock_video_path)
+        
         if os.path.exists(audio_path):
             os.remove(audio_path)
-        # Clean up temp video files
+        if music_path and os.path.exists(music_path):
+            os.remove(music_path)
+        
         for i in range(3):
             temp_file = f"/tmp/stock_{job_id}_{i}.mp4"
             if os.path.exists(temp_file):
@@ -268,7 +316,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             "video_path": output_path
         })
         
-        print(f"[{job_id}] ✅ SUCCESS with captions!")
+        print(f"[{job_id}] ✅ SUCCESS with music and captions!")
         
     except Exception as e:
         error_msg = str(e)
