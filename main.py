@@ -49,7 +49,7 @@ def update_job(job_id, updates):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API - Ultra Lite"}
+    return {"status": "ViralForge API - Ultra Lite v2"}
 
 @app.post("/generate-video")
 async def generate_video(
@@ -92,7 +92,7 @@ async def download_video(job_id: str):
 
 async def create_video(job_id: str, topic: str, duration: int):
     try:
-        print(f"[{job_id}] Starting Ultra Lite generation...")
+        print(f"[{job_id}] Starting...")
         
         # Step 1: Generate script (20%)
         update_job(job_id, {"progress": 20})
@@ -118,27 +118,24 @@ async def create_video(job_id: str, topic: str, duration: int):
         audio_duration = audio.duration
         print(f"[{job_id}] Audio duration: {audio_duration:.2f}s")
         
-        # Step 3: Create simple video (70%)
+        # Step 3: Create video clip (70%)
         update_job(job_id, {"progress": 70})
-        print(f"[{job_id}] Creating video with gradient background...")
+        print(f"[{job_id}] Creating video...")
         
-        # Create a single gradient clip (purple to blue)
-        # This is MUCH simpler than concatenating
-        def make_frame(t):
-            # Simple gradient animation
-            if t < audio_duration / 2:
-                return [[139, 92, 246] for _ in range(480 * 854)]  # Purple
-            else:
-                return [[59, 130, 246] for _ in range(480 * 854)]  # Blue
+        # Create a simple colored clip - MoviePy 2.x syntax
+        clip = ColorClip(
+            size=(480, 854), 
+            color=(139, 92, 246),  # Purple
+            duration=audio_duration,
+            fps=15  # Set FPS here, not with set_fps()
+        )
         
-        # Even simpler: Just use one solid color clip
-        clip = ColorClip(size=(480, 854), color=(139, 92, 246), duration=audio_duration)
-        clip = clip.set_fps(15)
-        clip = clip.set_audio(audio)
+        # Add audio to clip
+        clip = clip.with_audio(audio)
         
         # Step 4: Render (90%)
         update_job(job_id, {"progress": 90})
-        print(f"[{job_id}] Rendering video (this may take a minute)...")
+        print(f"[{job_id}] Rendering...")
         
         output_path = f"/tmp/video_{job_id}.mp4"
         
@@ -146,7 +143,6 @@ async def create_video(job_id: str, topic: str, duration: int):
             output_path,
             codec="libx264",
             audio_codec="aac",
-            fps=15,
             preset="ultrafast",
             bitrate="500k",
             threads=1,
@@ -165,7 +161,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             "video_path": output_path
         })
         
-        print(f"[{job_id}] ✅ SUCCESS! Video saved to {output_path}")
+        print(f"[{job_id}] ✅ SUCCESS!")
         
     except Exception as e:
         error_msg = f"{str(e)}"
@@ -178,7 +174,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             "error": error_msg
         })
 
-# Cleanup old jobs on startup
+# Cleanup old jobs
 import shutil
 if JOBS_DIR.exists():
     shutil.rmtree(JOBS_DIR)
