@@ -11,6 +11,7 @@ import imageio_ffmpeg
 import asyncio
 import time
 import uuid
+import json
 from pathlib import Path
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
@@ -29,8 +30,29 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Store job status (in production, use Redis/database)
-jobs = {}
+# Create jobs directory
+JOBS_DIR = Path("/tmp/jobs")
+JOBS_DIR.mkdir(exist_ok=True)
+
+def save_job(job_id, job_data):
+    """Save job to file"""
+    with open(JOBS_DIR / f"{job_id}.json", "w") as f:
+        json.dump(job_data, f)
+
+def load_job(job_id):
+    """Load job from file"""
+    job_file = JOBS_DIR / f"{job_id}.json"
+    if not job_file.exists():
+        return None
+    with open(job_file, "r") as f:
+        return json.load(f)
+
+def update_job(job_id, updates):
+    """Update job fields"""
+    job = load_job(job_id)
+    if job:
+        job.update(updates)
+        save_job(job_id, job)
 
 @app.get("/")
 def root():
@@ -41,33 +63,37 @@ async def generate_video(
     topic: str = Query(..., description="Video topic"),
     duration: int = Query(default=15, ge=10, le=30)
 ):
-    """Start a video generation job (returns immediately)"""
+    """Start a video generation job"""
     job_id = str(uuid.uuid4())
     
-    jobs[job_id] = {
+    job_data = {
+        "job_id": job_id,
         "status": "processing",
+        "progress": 0,
         "topic": topic,
         "duration": duration,
         "created_at": time.time(),
         "video_path": None
     }
     
-    # Start video generation in background
+    save_job(job_id, job_data)
+    
+    # Start background task
     asyncio.create_task(create_video(job_id, topic, duration))
     
     return {
         "job_id": job_id,
         "status": "processing",
-        "message": "Video generation started. Use job_id to check status."
+        "message": "Video generation started"
     }
 
 @app.get("/job-status/{job_id}")
 async def get_job_status(job_id: str):
-    """Check if video is ready"""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """Check job status"""
+    job = load_job(job_id)
     
-    job = jobs[job_id]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
     return {
         "job_id": job_id,
@@ -77,11 +103,11 @@ async def get_job_status(job_id: str):
 
 @app.get("/download-video/{job_id}")
 async def download_video(job_id: str):
-    """Download the finished video"""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """Download finished video"""
+    job = load_job(job_id)
     
-    job = jobs[job_id]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
     if job["status"] != "completed":
         raise HTTPException(status_code=400, detail="Video not ready yet")
@@ -93,28 +119,28 @@ async def download_video(job_id: str):
     )
 
 async def create_video(job_id: str, topic: str, duration: int):
-    """Background task to create the video"""
+    """Background video creation task"""
     try:
-        job = jobs[job_id]
+        update_job(job_id, {"progress": 10})
         
-        # Step 1: Generate script (20%)
-        job["progress"] = 20
-        word_count = min(duration * 2, 40)
+        # Generate script
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Write a {duration}-second viral script about {topic}. Use {word_count} words max."}]
+            messages=[{"role": "user", "content": f"Write a {duration}-second viral script about {topic}. {duration*2} words max."}]
         )
         script = response.choices[0].message.content
         
-        # Step 2: Generate voiceover (40%)
-        job["progress"] = 40
+        update_job(job_id, {"progress": 30})
+        
+        # Generate audio
         tts = gTTS(text=script, lang='en', slow=False)
-        audio_path = f"audio_{job_id}.mp3"
+        audio_path = f"/tmp/audio_{job_id}.mp3"
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         
-        # Step 3: Get stock footage (60%)
-        job["progress"] = 60
+        update_job(job_id, {"progress": 50})
+        
+        # Get stock footage
         headers = {"Authorization": PEXELS_API_KEY}
         search_url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
         pexels_res = requests.get(search_url, headers=headers, timeout=10).json()
@@ -122,7 +148,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         video_clips = []
         clip_duration = audio.duration / 2
         
-        for i, video in enumerate(pexels_res['videos'][:2]):
+        for video in pexels_res['videos'][:2]:
             video_url = video['video_files'][0]['link']
             vid_res = requests.get(video_url, timeout=15)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_vid:
@@ -137,12 +163,13 @@ async def create_video(job_id: str, topic: str, duration: int):
                 
                 video_clips.append(clip)
         
-        # Step 4: Combine and render (80%)
-        job["progress"] = 80
+        update_job(job_id, {"progress": 80})
+        
+        # Render video
         final_video = concatenate_videoclips(video_clips, method="compose")
         final_video = final_video.with_audio(audio)
         
-        output_path = f"video_{job_id}.mp4"
+        output_path = f"/tmp/video_{job_id}.mp4"
         final_video.write_videofile(
             output_path,
             codec="libx264",
@@ -154,31 +181,19 @@ async def create_video(job_id: str, topic: str, duration: int):
             logger=None
         )
         
-        # Clean up audio
+        update_job(job_id, {
+            "status": "completed",
+            "progress": 100,
+            "video_path": output_path
+        })
+        
+        # Cleanup audio
         if os.path.exists(audio_path):
             os.remove(audio_path)
         
-        # Complete (100%)
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["video_path"] = output_path
-        
     except Exception as e:
-        job["status"] = "failed"
-        job["error"] = str(e)
+        update_job(job_id, {
+            "status": "failed",
+            "error": str(e)
+        })
         print(f"Job {job_id} failed: {str(e)}")
-
-# Cleanup old jobs every hour
-async def cleanup_old_jobs():
-    while True:
-        await asyncio.sleep(3600)
-        current_time = time.time()
-        expired_jobs = [jid for jid, job in jobs.items() 
-                       if current_time - job["created_at"] > 3600]
-        for jid in expired_jobs:
-            if jobs[jid].get("video_path") and os.path.exists(jobs[jid]["video_path"]):
-                os.remove(jobs[jid]["video_path"])
-            del jobs[jid]
-
-# Start cleanup task
-asyncio.create_task(cleanup_old_jobs())
