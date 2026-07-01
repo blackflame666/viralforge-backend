@@ -76,7 +76,7 @@ async def generate_video(topic: str):
             
             # Write video (LOW quality for speed)
             output_path = "final_video.mp4"
-            final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=15, verbose=False, logger=None)
+            final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=15)
         
         elapsed = time.time() - start_time
         
