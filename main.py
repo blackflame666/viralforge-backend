@@ -89,7 +89,7 @@ def split_text_for_captions(text, max_words=5):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v14 - Stable!"}
+    return {"status": "ViralForge API v15 - With Safe Pexels!"}
 
 @app.post("/generate-video")
 async def generate_video(topic: str = Query(...), duration: int = Query(default=10, ge=5, le=15)):
@@ -135,6 +135,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             messages=[{"role": "user", "content": f"Write a {duration}-second script about {topic}. {duration*2} words max."}]
         )
         script = response.choices[0].message.content
+        print(f"[{job_id}] Script: {script[:50]}...")
         
         # Audio (40%)
         update_job(job_id, {"progress": 40})
@@ -143,19 +144,82 @@ async def create_video(job_id: str, topic: str, duration: int):
         tts.save(audio_path)
         audio = AudioFileClip(audio_path)
         audio_duration = audio.duration
+        print(f"[{job_id}] Audio: {audio_duration:.2f}s")
         
         caption_chunks = split_text_for_captions(script, max_words=5)
         chunk_duration = audio_duration / len(caption_chunks) if caption_chunks else 2
         
-        # Video - SIMPLIFIED (Just use colored background to avoid crashes)
-        update_job(job_id, {"progress": 60})
-        print(f"[{job_id}] Creating video...")
+        # Stock Footage (60%) - SAFE VERSION
+        update_job(job_id, {"progress": 55})
+        print(f"[{job_id}] Fetching Pexels footage...")
         
-        # Create simple colored background (reliable, no crashes)
-        final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
+        video_clips = []
+        if PEXELS_API_KEY:
+            try:
+                headers = {"Authorization": PEXELS_API_KEY}
+                url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
+                res = requests.get(url, headers=headers, timeout=10).json()
+                
+                if res.get('videos'):
+                    print(f"[{job_id}] Found {len(res['videos'])} videos")
+                    
+                    for i, video in enumerate(res['videos'][:2]):
+                        try:
+                            video_files = video.get('video_files', [])
+                            if not video_files:
+                                continue
+                            
+                            video_url = video_files[0]['link']
+                            print(f"[{job_id}] Downloading clip {i+1}...")
+                            
+                            vid_data = requests.get(video_url, timeout=15).content
+                            temp_path = f"/tmp/stock_{job_id}_{i}.mp4"
+                            
+                            with open(temp_path, 'wb') as f:
+                                f.write(vid_data)
+                            
+                            clip = VideoFileClip(temp_path)
+                            clip = clip.resized((720, 1280))
+                            
+                            # ✅ SAFE: Just trim or repeat manually, no .loop()
+                            target_duration = audio_duration / min(2, len(res['videos']))
+                            
+                            if clip.duration >= target_duration:
+                                clip = clip.subclipped(0, target_duration)
+                            # If clip is too short, we'll handle it during concatenation
+                            
+                            video_clips.append(clip)
+                            print(f"[{job_id}] Clip {i+1} ready: {clip.duration:.2f}s")
+                            
+                        except Exception as e:
+                            print(f"[{job_id}] Clip error: {e}")
+                            continue
+                            
+            except Exception as e:
+                print(f"[{job_id}] Pexels error: {e}")
+        else:
+            print(f"[{job_id}] No Pexels key")
         
-        # Add captions
+        # Create final video
+        update_job(job_id, {"progress": 65})
+        
+        if video_clips:
+            print(f"[{job_id}] Using {len(video_clips)} stock clips")
+            final_video = concatenate_videoclips(video_clips, method="compose")
+            
+            # If total video is shorter than audio, add purple background at end
+            if final_video.duration < audio_duration:
+                remaining = audio_duration - final_video.duration
+                print(f"[{job_id}] Adding {remaining:.2f}s purple background")
+                bg_clip = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=remaining).with_fps(15)
+                final_video = concatenate_videoclips([final_video, bg_clip], method="compose")
+        else:
+            print(f"[{job_id}] Using purple background")
+            final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
+        
+        # Add captions (75%)
         update_job(job_id, {"progress": 75})
+        
         if caption_chunks:
             caption_overlays = []
             for i, text in enumerate(caption_chunks):
@@ -168,21 +232,24 @@ async def create_video(job_id: str, topic: str, duration: int):
             if caption_overlays:
                 final_video = CompositeVideoClip([final_video] + caption_overlays, size=(720, 1280))
         
-        # Audio only (no music to avoid complexity)
+        final_video = final_video.with_fps(15)
+        
+        # Mix audio (85%)
         update_job(job_id, {"progress": 85})
         final_video = final_video.with_audio(audio)
         
-        # Render
+        # Render (90%)
         update_job(job_id, {"progress": 90})
         print(f"[{job_id}] Rendering...")
         
         output_path = f"/tmp/video_{job_id}.mp4"
+        
         final_video.write_videofile(
             output_path,
             codec="libx264",
             audio_codec="aac",
             preset="ultrafast",
-            bitrate="500k",
+            bitrate="800k",
             threads=1,
             logger=None
         )
@@ -193,12 +260,20 @@ async def create_video(job_id: str, topic: str, duration: int):
         if os.path.exists(audio_path):
             os.remove(audio_path)
         
+        for i in range(3):
+            temp_file = f"/tmp/stock_{job_id}_{i}.mp4"
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        
         update_job(job_id, {"status": "completed", "progress": 100, "video_path": output_path})
         print(f"[{job_id}] SUCCESS!")
         
     except Exception as e:
-        print(f"[{job_id}] FAILED: {e}")
-        update_job(job_id, {"status": "failed", "error": str(e)})
+        error_msg = str(e)
+        print(f"[{job_id}] FAILED: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        update_job(job_id, {"status": "failed", "error": error_msg})
 
 # Startup cleanup
 import shutil
