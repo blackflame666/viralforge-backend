@@ -6,7 +6,7 @@ import requests
 import tempfile
 from openai import OpenAI
 from gtts import gTTS
-from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, ImageClip
+from moviepy import ColorClip, AudioFileClip, VideoFileClip, CompositeVideoClip, CompositeAudioClip, ImageClip, concatenate_videoclips
 import imageio_ffmpeg
 import asyncio
 import time
@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-import shutil
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -32,7 +31,6 @@ app.add_middleware(
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
-REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -120,7 +118,7 @@ async def download_background_music(duration, job_id):
 
 @app.get("/")
 def root():
-    return {"status": "ViralForge API v12 - Fixed Jobs!"}
+    return {"status": "ViralForge API v13 - MoviePy 2.x Fixed!"}
 
 @app.post("/generate-video")
 async def generate_video(topic: str = Query(...), duration: int = Query(default=10, ge=5, le=15)):
@@ -128,7 +126,7 @@ async def generate_video(topic: str = Query(...), duration: int = Query(default=
     job_data = {
         "job_id": job_id, 
         "status": "processing", 
-        "progress": 5,  # Start at 5%
+        "progress": 5,
         "topic": topic, 
         "duration": duration, 
         "created_at": time.time(), 
@@ -163,7 +161,6 @@ async def download_video(job_id: str):
 
 async def create_video(job_id: str, topic: str, duration: int):
     music_path = None
-    ai_video_path = None
     try:
         print(f"[{job_id}] Starting video generation...")
         update_job(job_id, {"progress": 10})
@@ -191,7 +188,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         caption_chunks = split_text_for_captions(script, max_words=5)
         chunk_duration = audio_duration / len(caption_chunks) if caption_chunks else 2
         
-        # 3. Stock Footage (Simple fallback)
+        # 3. Stock Footage
         update_job(job_id, {"progress": 50})
         print(f"[{job_id}] Fetching stock footage...")
         
@@ -202,13 +199,18 @@ async def create_video(job_id: str, topic: str, duration: int):
                 url = f"https://api.pexels.com/videos/search?query={topic}&per_page=2&orientation=portrait"
                 res = requests.get(url, headers=headers, timeout=10).json()
                 
-                if res.get('videos'):
+                if res.get('videos') and len(res['videos']) > 0:
                     num_clips = min(len(res['videos']), 2)
                     clip_duration_each = audio_duration / num_clips
                     
                     for i, video in enumerate(res['videos'][:num_clips]):
-                        video_url = video['video_files'][0]['link']
-                        vid_data = requests.get(video_url, timeout=15).content
+                        video_files = video.get('video_files', [])
+                        if not video_files:
+                            continue
+                        
+                        video_url = video_files[0]['link']
+                        print(f"[{job_id}] Downloading video {i+1}...")
+                        vid_data = requests.get(video_url, timeout=20).content
                         
                         temp_path = f"/tmp/stock_{job_id}_{i}.mp4"
                         with open(temp_path, 'wb') as f:
@@ -217,13 +219,16 @@ async def create_video(job_id: str, topic: str, duration: int):
                         clip = VideoFileClip(temp_path)
                         clip = clip.resized((720, 1280))
                         
+                        # ✅ MoviePy 2.x FIX: Use vfx.Loop instead of .loop()
                         if clip.duration < clip_duration_each:
-                            clip = clip.loop(duration=clip_duration_each)
+                            from moviepy import vfx
+                            clip = clip.with_effects([vfx.Loop(duration=clip_duration_each)])
                         else:
                             clip = clip.subclipped(0, clip_duration_each)
                         
                         video_clips.append(clip)
-                        print(f"[{job_id}] Clip {i+1} ready")
+                        print(f"[{job_id}] ✅ Clip {i+1} ready: {clip.duration:.2f}s")
+                        
             except Exception as e:
                 print(f"[{job_id}] Pexels error: {e}")
         
@@ -231,14 +236,15 @@ async def create_video(job_id: str, topic: str, duration: int):
         update_job(job_id, {"progress": 60})
         
         if video_clips:
-            from moviepy import concatenate_videoclips
             final_video = concatenate_videoclips(video_clips, method="compose")
             
+            # Ensure video matches audio duration
             if final_video.duration < audio_duration:
                 remaining = audio_duration - final_video.duration
                 bg_clip = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=remaining).with_fps(15)
                 final_video = concatenate_videoclips([final_video, bg_clip], method="compose")
         else:
+            print(f"[{job_id}] No stock footage, using purple background")
             final_video = ColorClip(size=(720, 1280), color=(139, 92, 246), duration=audio_duration).with_fps(15)
         
         # 5. Music
@@ -302,7 +308,7 @@ async def create_video(job_id: str, topic: str, duration: int):
         
         print(f"[{job_id}] Video rendered successfully!")
         
-        # 9. Cleanup temp files ONLY (NOT the job file!)
+        # 9. Cleanup
         final_video.close()
         audio.close()
         if os.path.exists(audio_path):
@@ -314,7 +320,7 @@ async def create_video(job_id: str, topic: str, duration: int):
             if os.path.exists(temp_file):
                 os.remove(temp_file)
         
-        # 10. Mark as complete
+        # 10. Complete
         update_job(job_id, {
             "status": "completed", 
             "progress": 100, 
